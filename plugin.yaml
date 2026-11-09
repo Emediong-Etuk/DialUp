@@ -1,0 +1,105 @@
+name: dialup
+label: DialUp (USSD + SMS)
+kind: platform
+version: 0.1.0
+manifest_version: 2
+api_version: 1
+license: MIT
+homepage: https://github.com/Emediong-Etuk/hermes-dialup
+tags: [gateway, ussd, sms, africastalking, nigeria, feature-phone]
+author: Emediong-Etuk
+description: >
+  Reach your Hermes agent from any GSM phone with no app and no data. Dial a
+  USSD code to ask a question, pick a saved task or read your last reply page
+  by page; answers, reminders and approval alerts come back by SMS. Runs on
+  Africa's Talking (Nigeria, Kenya, Uganda, Tanzania). A local transport writes
+  SMS to a file so you can try it with no account.
+requires_hermes: ">=0.23.0"
+provides_tools: []
+provides_hooks: []
+# Nothing is required: DIALUP_TRANSPORT=local works with no Africa's Talking account.
+# The adapter refuses to start in africastalking mode until the credentials are set.
+requires_env: []
+optional_env:
+  - name: AFRICASTALKING_USERNAME
+    description: "Africa's Talking app username ('sandbox' for the sandbox app)"
+    prompt: "Africa's Talking username"
+    url: "https://account.africastalking.com/"
+    password: false
+  - name: AFRICASTALKING_API_KEY
+    description: "Africa's Talking API key (sent only to Africa's Talking messaging hosts)"
+    prompt: "Africa's Talking API key"
+    url: "https://account.africastalking.com/"
+    password: true
+  - name: DIALUP_TRANSPORT
+    description: "'africastalking' (default) or 'local' (SMS go to plugin-data/dialup/outbox.jsonl; no account needed)"
+    prompt: "Transport (africastalking or local)"
+    password: false
+  - name: DIALUP_WEBHOOK_SECRET
+    description: "Unguessable path segment for the USSD callback URL; generate one with `hermes dialup secret`"
+    prompt: "Webhook secret"
+    password: true
+  - name: DIALUP_ALLOWED_USERS
+    description: "Comma-separated phone numbers allowed to use DialUp (E.164, e.g. +2348031234567). Empty = nobody"
+    prompt: "Allowed phone numbers (comma-separated)"
+    password: false
+  - name: DIALUP_ALLOW_ALL_USERS
+    description: "true lets ANY phone number use your agent and receive SMS. Leave unset unless you mean it"
+    prompt: "Allow every phone number (true/false)"
+    password: false
+  - name: DIALUP_HOME_CHANNEL
+    description: "Your own number, used for cron deliver=dialup"
+    prompt: "Home phone number"
+    password: false
+  - name: DIALUP_SERVICE_CODE
+    description: "USSD code shown in SMS footers and help (default *384*55#)"
+    prompt: "USSD service code"
+    password: false
+  - name: DIALUP_SMS_FROM
+    description: "Optional Africa's Talking sender ID or shortcode (leave empty in the sandbox)"
+    prompt: "SMS sender ID (or empty)"
+    password: false
+  - name: DIALUP_AT_API_BASE
+    description: "Override the Africa's Talking messaging host (default picks sandbox or live from the username)"
+    prompt: "Africa's Talking API base URL (or empty)"
+    password: false
+  - name: DIALUP_WEBHOOK_HOST
+    description: "Address the webhook listens on (default 127.0.0.1; expose it with a tunnel or reverse proxy)"
+    prompt: "Webhook bind address"
+    password: false
+  - name: DIALUP_WEBHOOK_PORT
+    description: "Port the webhook listens on (default 8787)"
+    prompt: "Webhook port"
+    password: false
+  - name: DIALUP_DEFAULT_COUNTRY_CODE
+    description: "Country code used to normalise local numbers like 0803... (default 234)"
+    prompt: "Default country code"
+    password: false
+  - name: DIALUP_QUICK_PROMPTS
+    description: "Up to 5 saved prompts separated by |, e.g. Summarise my day|Any urgent email?"
+    prompt: "Quick prompts (| separated)"
+    password: false
+  - name: DIALUP_SMS_MAX_CHARS
+    description: "Longest SMS sent (default 459 = 3 GSM-7 parts); longer replies are cut and kept for the USSD reader"
+    prompt: "Max SMS characters"
+    password: false
+  - name: DIALUP_USSD_PAGE_CHARS
+    description: "Characters per USSD screen, footer included (default 160)"
+    prompt: "USSD screen size"
+    password: false
+  - name: DIALUP_SMS_HOURLY_CAP
+    description: "Max SMS per number per hour (default 20)"
+    prompt: "SMS per number per hour"
+    password: false
+  - name: DIALUP_TURNS_HOURLY_CAP
+    description: "Max agent turns started from USSD per number per hour (default 30)"
+    prompt: "Agent turns per number per hour"
+    password: false
+  - name: DIALUP_STORE_REPLIES
+    description: "Keep recent replies so they can be read on USSD (default true)"
+    prompt: "Store replies (true/false)"
+    password: false
+  - name: DIALUP_REPLY_TTL_HOURS
+    description: "Hours stored replies are kept (default 24)"
+    prompt: "Reply retention (hours)"
+    password: false

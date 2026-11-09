@@ -1,0 +1,16 @@
+[project]
+name = "hermes-dialup"
+version = "0.1.0"
+description = "DialUp: reach your Hermes agent over USSD and SMS (Africa's Talking)"
+readme = "README.md"
+license = { text = "MIT" }
+authors = [{ name = "Emediong-Etuk" }]
+requires-python = ">=3.11"
+dependencies = [
+  # The inbound USSD webhook server. Hermes core only ships aiohttp in its messaging extras.
+  # Outbound HTTP uses core's SSRF-safe httpx client, so nothing else is needed.
+  "aiohttp>=3.9,<4",
+]
+
+[project.urls]
+Homepage = "https://github.com/Emediong-Etuk/hermes-dialup"

@@ -4,7 +4,7 @@ DialUp is a Hermes Agent platform plugin (`kind: platform`). A phone dials a USS
 Africa's Talking (AT); Hermes answers by SMS. This file is the working plan: what we build, what
 the Hermes source told us, what is still open, and the milestone checklist.
 
-Status: **M4 code done** (Nov 9). Open: valid AT sandbox key, live tunnel run, demo, release.
+Status: **M4 code done** (Nov 9). Open: live tunnel run on Greg's machine, demo, release.
 
 ---
 
@@ -244,6 +244,16 @@ M4 notes (Nov 9, ahead of schedule):
   (`approvals.timeout: 20`): menu item retired, folder kept, the agent's reply said it did not run.
 - Hermes' default `approvals.mode: smart` let the auxiliary model approve an explicitly requested
   `rm -rf` in /tmp without asking; the README explains `manual` for people who want every prompt.
+
+M2 follow-up (Nov 9, after the key was re-entered):
+- AT sandbox key works: `GET /version1/user` → balance NGN 51.83.
+- `hermes dialup send-test --to +2347012345678` → AT accepted it (`ATXid_...`).
+- Full path minus AT's inbound hop: real gateway on the AT transport, `hermes dialup simulate` sends
+  AT-format callbacks, real agent turn, the reply went out through AT's API (48 chars, no outbox
+  write, balance down to NGN 47.43).
+- Hermes reads the profile's `.env` ahead of the shell environment, so `DIALUP_*` settings belong
+  in `~/.hermes/.env` (a shell `export` is ignored when `.env` sets the same name).
+- Still to do on Greg's machine: AT → tunnel → webhook, from AT's simulator.
 
 **M5, Wed by 18:00 WAT**
 - [ ] Final commit → SHA → `catalog/dialup.yaml` + `catalog/PR_DESCRIPTION.md`

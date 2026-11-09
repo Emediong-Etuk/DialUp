@@ -208,9 +208,20 @@ M2 notes (Nov 9):
   DialUp log line has only redacted numbers, lengths or status codes.
 
 **M3, Tue night (P0)**
-- [ ] README with Disclosure, `.env.example`, CI workflow
-- [ ] `hermes plugins validate . --install-deps` passes; every warning read and explained
+- [x] README with Disclosure, `.env.example`, CI workflow
+- [x] `hermes plugins validate . --install-deps` passes with no warnings (also on the v0.23.0 release)
 - [ ] Repo pushed public
+
+M3 notes (Nov 9):
+- **The floor is tested, not assumed.** Hermes `v0.23.0` installed with `uv sync` (its own lock file;
+  `pip install -e` can't resolve it): 131 tests, `doctor --ci` and `validate --install-deps` all pass,
+  with the real version detected. CI runs the same on `v0.23.0` and `main`.
+- CI pins every action to a commit SHA and resolves plugin dependencies with
+  `UV_EXCLUDE_NEWER="3 days"` (our own release quarantine, catalog rule 10).
+- README recommends `hermes tools disable --platform dialup terminal code_execution computer_use
+  browser file image_gen tts vision` (command checked) and `cron.wrap_response: false`.
+- Greg's sandbox: USSD code `*384*37264#`, simulator number `+2347012345678`.
+- Still open from M2: the sandbox key returns 401, and the live tunnel run.
 
 **M4, Wed morning**
 - [ ] P1: approvals over USSD, `5 Stop task`, quick tasks if not done

@@ -1,0 +1,65 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: tests + validate (hermes ${{ matrix.hermes-ref }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        # v0.23.0 is the floor declared in plugin.yaml (requires_hermes); main catches upcoming breakage.
+        hermes-ref: [v0.23.0, main]
+    env:
+      HERMES_HOME: ${{ github.workspace }}/hermes-home
+      VENV: ${{ github.workspace }}/venv
+    steps:
+      - name: Check out DialUp
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          path: DialUp
+
+      - name: Check out Hermes Agent
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: NousResearch/hermes-agent
+          ref: ${{ matrix.hermes-ref }}
+          path: hermes-agent
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2  # v10.3.3
+
+      - name: Install Hermes from its lock file
+        working-directory: hermes-agent
+        env:
+          UV_PROJECT_ENVIRONMENT: ${{ env.VENV }}
+        run: |
+          uv sync --python 3.14 --extra messaging
+          uv pip install --python "$VENV/bin/python" pytest pytest-asyncio
+          echo "$VENV/bin" >> "$GITHUB_PATH"
+
+      - name: Unit tests
+        working-directory: DialUp
+        env:
+          PYTHONPATH: ${{ github.workspace }}/hermes-agent
+        run: python -m pytest -q
+
+      - name: Plugin doctor
+        working-directory: DialUp
+        run: |
+          mkdir -p "$HERMES_HOME"
+          hermes plugins doctor . --ci
+
+      - name: Plugin validate (the catalog CI gate)
+        working-directory: DialUp
+        env:
+          # Our own release quarantine for plugin dependencies (catalog rule 10).
+          UV_EXCLUDE_NEWER: "3 days"
+        run: hermes plugins validate . --install-deps

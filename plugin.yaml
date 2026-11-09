@@ -5,7 +5,7 @@ version: 0.1.0
 manifest_version: 2
 api_version: 1
 license: MIT
-homepage: https://github.com/Emediong-Etuk/hermes-dialup
+homepage: https://github.com/Emediong-Etuk/DialUp
 tags: [gateway, ussd, sms, africastalking, nigeria, feature-phone]
 author: Emediong-Etuk
 description: >

@@ -166,7 +166,7 @@ def load_settings(extra: Optional[Mapping[str, Any]] = None) -> Settings:
         home_channel=normalize_phone(home_raw, country) or "",
         default_country_code=country,
         sms_max_chars=_as_int(_read(extra, "sms_max_chars", "DIALUP_SMS_MAX_CHARS", 459), 459, low=60, high=1530),
-        ussd_page_chars=_as_int(_read(extra, "ussd_page_chars", "DIALUP_USSD_PAGE_CHARS", 160), 160, low=60, high=182),
+        ussd_page_chars=_as_int(_read(extra, "ussd_page_chars", "DIALUP_USSD_PAGE_CHARS", 160), 160, low=120, high=182),
         quick_prompts=tuple(_split_prompts(_read(extra, "quick_prompts", "DIALUP_QUICK_PROMPTS", ""))),
         sms_hourly_cap=_as_int(_read(extra, "sms_hourly_cap", "DIALUP_SMS_HOURLY_CAP", 20), 20, low=1, high=10_000),
         turns_hourly_cap=_as_int(_read(extra, "turns_hourly_cap", "DIALUP_TURNS_HOURLY_CAP", 30), 30, low=1, high=10_000),

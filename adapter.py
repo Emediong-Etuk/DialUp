@@ -1,32 +1,177 @@
 """DialUp gateway adapter: USSD webhook in, SMS out.
 
-M0 skeleton: validates config, serves the health route and shuts down cleanly. The USSD state
-machine, the transports and send() arrive in M1 (see PLAN.md).
+Inbound: Africa's Talking POSTs each USSD keypress round to ``/dialup/ussd/<secret>``. The handler
+checks the secret and the allowlist, runs the menu state machine (``ussd.py``) and answers within
+the callback; when the user sends a message it starts the agent turn in the background, so the
+phone never waits on the model.
+
+Outbound: ``send()`` turns the agent's reply into GSM-7 text, keeps the full reply for the USSD
+reader, cuts the SMS to ``DIALUP_SMS_MAX_CHARS`` with a "read the rest on USSD" footer, applies
+the hourly SMS cap and the outbound allowlist, and hands it to the transport.
 """
 
 from __future__ import annotations
 
+import asyncio
+import hashlib
+import hmac
 import logging
-from typing import Any, Optional
+import re
+import time
+import urllib.parse
+from dataclasses import dataclass
+from typing import Any, Mapping, Optional
 
 from aiohttp import web
 
 from gateway.config import Platform, PlatformConfig
 from gateway.platforms.base import BasePlatformAdapter, SendResult
-from gateway.platforms.helpers import redact_phone
+from gateway.platforms.event import MessageEvent, MessageType
+from gateway.platforms.helpers import MessageDeduplicator, redact_phone, strip_markdown
 
-from .settings import load_settings
+from . import ussd
+from .phone import normalize_phone
+from .settings import Settings, load_settings
+from .smstext import full_reply_footer, to_gsm7, truncate_for_sms
+from .store import Store
+from .transport import Transport, build_transport
 
 logger = logging.getLogger(__name__)
 
 MAX_BODY_BYTES = 16 * 1024
+SORRY = ussd.END + "Sorry, something went wrong. Please try again."
+NOT_ALLOWED = ussd.END + "This number can't use this service."
+LIMIT_REACHED = ussd.END + "Limit reached. Try again later."
 
+# The gateway's own busy/status acknowledgements. Mirrors LINE's ``_SYSTEM_BYPASS_PREFIXES``
+# (plugins/platforms/line/adapter.py, checked at hermes-agent 4c11aea4) plus the "♻" gateway
+# online/restarted notice. These are shown on the USSD home screen instead of costing an SMS.
+STATUS_PREFIXES = ("⚡", "⏳", "⏩", "💾", "♻")
+STATUS_MAX_CHARS = 60
+
+# How long an approval stays on the USSD menu. Core times the request out itself (approvals.timeout,
+# 5 minutes by default); this only stops a stale row from lingering if a timeout notice is missed.
+APPROVAL_MENU_MAX_AGE = 60 * 60
+
+# Form field limits. AT's values are short; anything longer is not from AT.
+_FIELD_LIMITS = {"sessionId": 128, "serviceCode": 40, "phoneNumber": 24, "text": 2048, "networkCode": 16}
+_SESSION_ID_RE = re.compile(r"^[A-Za-z0-9_.:\-]{1,128}$")
+
+
+class BadRequest(Exception):
+    def __init__(self, status: int, reason: str):
+        super().__init__(reason)
+        self.status = status
+        self.reason = reason
+
+
+def parse_ussd_form(raw: bytes) -> dict[str, str]:
+    """Validate and decode an AT USSD callback body. Raises ``BadRequest``."""
+    try:
+        form = urllib.parse.parse_qs(raw.decode("utf-8"), keep_blank_values=True, strict_parsing=bool(raw),
+                                     max_num_fields=20)
+    except (UnicodeDecodeError, ValueError) as exc:
+        raise BadRequest(400, "malformed form body") from exc
+    fields: dict[str, str] = {}
+    for name, limit in _FIELD_LIMITS.items():
+        values = form.get(name, [""])
+        value = values[0] if values else ""
+        if len(value) > limit:
+            raise BadRequest(400, f"{name} too long")
+        fields[name] = value
+    if not _SESSION_ID_RE.match(fields["sessionId"]):
+        raise BadRequest(400, "missing or invalid sessionId")
+    if not fields["phoneNumber"]:
+        raise BadRequest(400, "missing phoneNumber")
+    return fields
+
+
+def is_status_message(content: str, metadata: Optional[Mapping[str, Any]] = None) -> bool:
+    """A gateway status/busy acknowledgement or other mid-turn send, not an answer."""
+    if (metadata or {}).get("_interim_send"):
+        return True
+    return bool(content) and content.lstrip().startswith(STATUS_PREFIXES)
+
+
+def status_line(content: str) -> str:
+    """A status message as one short plain line for the USSD home screen."""
+    text = to_gsm7(strip_markdown(content or "")).replace("\n", " ").strip(" -:")
+    return text[:STATUS_MAX_CHARS].rstrip()
+
+
+def format_sms(content: str) -> str:
+    """Agent text → what an SMS carries: no markdown, GSM-7 only."""
+    return to_gsm7(strip_markdown(content or ""))
+
+
+def live_allowlist(extra: Optional[Mapping[str, Any]]) -> tuple[frozenset[str], bool]:
+    """(allowed numbers, allow-all) re-read now, so an edited allowlist applies at once."""
+    s = load_settings(extra)
+    return s.allowed_users, s.allow_all_users
+
+
+# --------------------------------------------------------------------------- outbound core
+
+@dataclass(frozen=True)
+class Delivery:
+    success: bool
+    message_id: str = ""
+    error: str = ""
+    sent: bool = False  # an SMS actually went to the transport
+
+
+async def deliver(settings: Settings, store: Store, transport: Transport, chat_id: str, content: str,
+                  metadata: Optional[Mapping[str, Any]] = None, *, extra: Optional[Mapping[str, Any]] = None
+                  ) -> Delivery:
+    """The one outbound path, shared by the live adapter and cron's standalone sender."""
+    phone = normalize_phone(chat_id, settings.default_country_code)
+    if phone is None:
+        return Delivery(False, error="DialUp can only send to phone numbers")
+    allowed, allow_all = live_allowlist(extra)
+    if not (allow_all or phone in allowed or phone == settings.home_channel):
+        logger.warning("[dialup] refused SMS to %s: not on DIALUP_ALLOWED_USERS", redact_phone(phone))
+        return Delivery(False, error="refused: number is not on DIALUP_ALLOWED_USERS")
+
+    if is_status_message(content, metadata):
+        line = status_line(content)
+        if line:
+            await asyncio.to_thread(store.set_status, phone, line)
+        return Delivery(True, message_id="status")
+
+    text = format_sms(content)
+    if not text:
+        return Delivery(True, message_id="empty")
+    if settings.store_replies:
+        await asyncio.to_thread(store.add_reply, phone, text, ttl_hours=settings.reply_ttl_hours)
+        footer = full_reply_footer(settings.service_code)
+    else:
+        footer = " [cut]"
+    await asyncio.to_thread(store.clear_status, phone)
+    sms, cut = truncate_for_sms(text, settings.sms_max_chars, footer)
+
+    if not await asyncio.to_thread(store.try_consume_sms, phone, settings.sms_hourly_cap):
+        # Over the cap: one notice per hour, then nothing. The reply stays readable on USSD.
+        if await asyncio.to_thread(store.claim_notice, phone, "sms_cap"):
+            notice = (f"DialUp: SMS limit reached. Dial {settings.service_code} then 3 to read replies."
+                      if settings.store_replies else "DialUp: SMS limit reached. Try again later.")
+            await transport.send_sms(phone, notice)
+        logger.info("[dialup] SMS cap reached for %s; reply held (%d chars)", redact_phone(phone), len(text))
+        return Delivery(True, message_id="held")
+
+    result = await transport.send_sms(phone, sms)
+    if not result.success:
+        return Delivery(False, error=result.error)
+    logger.info("[dialup] SMS to %s sent (%d chars%s)", redact_phone(phone), len(sms), ", cut" if cut else "")
+    return Delivery(True, message_id=result.message_id, sent=True)
+
+
+# --------------------------------------------------------------------------- adapter
 
 class DialUpAdapter(BasePlatformAdapter):
     """One Hermes chat per phone number; replies leave by SMS."""
 
     # send() never loses text: it keeps the whole reply for the USSD reader and SMSes the head,
-    # so core hands it the full payload (cron delivery included). See PLAN.md section 3.5.
+    # so core hands it the full payload (cron delivery included). See PLAN.md section 3.
     splits_long_messages = True
     # ...but an SMS can still be cut, so core must not treat a long approval prompt as shown whole.
     reports_partial_delivery = False
@@ -35,7 +180,39 @@ class DialUpAdapter(BasePlatformAdapter):
         super().__init__(config, Platform("dialup"))
         self.settings = load_settings(config.extra)
         self.MAX_MESSAGE_LENGTH = self.settings.sms_max_chars
+        self._sessions = ussd.SessionStore()
+        self._dedup = MessageDeduplicator(ttl_seconds=600)
+        self._store: Optional[Store] = None
+        self._transport: Optional[Transport] = None
         self._runner: Optional[web.AppRunner] = None
+        self.bound_port: Optional[int] = None
+
+    # -- lifecycle ---------------------------------------------------------------------------
+
+    @property
+    def ussd_path(self) -> str:
+        secret = self.settings.webhook_secret
+        return f"/dialup/ussd/{secret}" if secret else "/dialup/ussd"
+
+    def _masked_path(self) -> str:
+        secret = self.settings.webhook_secret
+        return f"/dialup/ussd/{secret[:4]}…" if secret else "/dialup/ussd (no secret: local only)"
+
+    def build_app(self) -> web.Application:
+        app = web.Application(client_max_size=MAX_BODY_BYTES)
+        if self.settings.webhook_secret:
+            app.router.add_post("/dialup/ussd/{secret}", self._handle_ussd)
+            app.router.add_post("/dialup/ussd-events/{secret}", self._handle_ussd_event)
+        else:  # local transport on loopback only (settings.problems() enforces it)
+            app.router.add_post("/dialup/ussd", self._handle_ussd)
+            app.router.add_post("/dialup/ussd-events", self._handle_ussd_event)
+        app.router.add_get("/dialup/health", self._handle_health)
+        return app
+
+    async def open_resources(self, *, transport: Optional[Transport] = None, store: Optional[Store] = None) -> None:
+        """Storage and transport, without the HTTP listener (tests use this directly)."""
+        self._store = store or await asyncio.to_thread(Store)
+        self._transport = transport or build_transport(self.settings)
 
     async def connect(self, *, is_reconnect: bool = False) -> bool:
         problems = self.settings.problems()
@@ -44,37 +221,210 @@ class DialUpAdapter(BasePlatformAdapter):
             logger.error(message)
             self._set_fatal_error("dialup_config", message, retryable=False)
             return False
-        app = web.Application(client_max_size=MAX_BODY_BYTES)
-        app.router.add_get("/dialup/health", self._handle_health)
-        runner = web.AppRunner(app, access_log=None)
-        await runner.setup()
-        site = web.TCPSite(runner, self.settings.webhook_host, self.settings.webhook_port)
-        await site.start()
+        if not self.settings.allow_all_users and not self.settings.allowed_users:
+            logger.warning("[dialup] DIALUP_ALLOWED_USERS is empty: every number will be refused")
+        if self.settings.allow_all_users:
+            logger.warning("[dialup] DIALUP_ALLOW_ALL_USERS is on: ANY phone number can run your agent "
+                           "and receive SMS billed to you")
+        try:
+            await self.open_resources()
+            runner = web.AppRunner(self.build_app(), access_log=None)
+            await runner.setup()
+            site = web.TCPSite(runner, self.settings.webhook_host, self.settings.webhook_port)
+            await site.start()
+        except OSError as exc:
+            message = f"[dialup] cannot listen on {self.settings.webhook_host}:{self.settings.webhook_port}: {exc}"
+            logger.error(message)
+            self._set_fatal_error("dialup_listen", message, retryable=True)
+            return False
         self._runner = runner
         self._mark_connected()
-        logger.info("[dialup] listening on %s:%d (transport=%s)",
-                    self.settings.webhook_host, self.settings.webhook_port, self.settings.transport)
+        logger.info("[dialup] USSD callback POST %s on %s:%d (transport=%s)", self._masked_path(),
+                    self.settings.webhook_host, self.settings.webhook_port, self._transport.name)
         return True
 
     async def disconnect(self) -> None:
         if self._runner is not None:
             await self._runner.cleanup()
             self._runner = None
+        if self._transport is not None:
+            await self._transport.close()
+            self._transport = None
+        if self._store is not None:
+            await asyncio.to_thread(self._store.close)
+            self._store = None
         self._mark_disconnected()
+
+    # -- outbound ----------------------------------------------------------------------------
+
+    def format_message(self, content: str) -> str:
+        return format_sms(content)
 
     async def send(self, chat_id: str, content: str, reply_to: Optional[str] = None,
                    metadata: Optional[dict[str, Any]] = None) -> SendResult:
-        logger.warning("[dialup] send() to %s not implemented yet (M1)", redact_phone(chat_id))
-        return SendResult(success=False, error="DialUp send is not implemented yet")
+        if self._store is None or self._transport is None:
+            return SendResult(success=False, error="DialUp is not connected")
+        try:
+            outcome = await deliver(self.settings, self._store, self._transport, chat_id, content, metadata,
+                                    extra=self.config.extra)
+        except Exception as exc:  # never let a send failure take the turn down with it
+            logger.exception("[dialup] send to %s failed", redact_phone(chat_id))
+            return SendResult(success=False, error=f"DialUp send failed ({type(exc).__name__})")
+        if not outcome.success:
+            return SendResult(success=False, error=outcome.error)
+        return SendResult(success=True, message_id=outcome.message_id)
+
+    async def send_typing(self, chat_id: str, metadata=None) -> None:
+        return None  # nothing to show on a phone that is not in a USSD session
 
     async def get_chat_info(self, chat_id: str) -> dict[str, Any]:
         return {"name": redact_phone(chat_id), "type": "dm"}
+
+    def resolved_allowlist_user_ids(self) -> set:
+        """E.164 forms of DIALUP_ALLOWED_USERS, read live. Core's gateway authz compares the raw
+        env value with the sender id, so ``0803…`` written by a user would otherwise never match
+        the ``+234803…`` Africa's Talking sends."""
+        allowed, _ = live_allowlist(self.config.extra)
+        return set(allowed)
+
+    # -- inbound -----------------------------------------------------------------------------
+
+    def _secret_ok(self, request: web.Request) -> bool:
+        expected = self.settings.webhook_secret
+        if not expected:
+            return True  # no-secret routes exist only for the local transport on loopback
+        given = request.match_info.get("secret", "")
+        return hmac.compare_digest(given.encode("utf-8"), expected.encode("utf-8"))
+
+    async def _read_body(self, request: web.Request) -> bytes:
+        if request.content_length is not None and request.content_length > MAX_BODY_BYTES:
+            raise BadRequest(413, "body too large")
+        if request.content_type != "application/x-www-form-urlencoded":
+            raise BadRequest(400, "expected a form body")
+        try:
+            raw = await request.read()
+        except web.HTTPRequestEntityTooLarge as exc:
+            raise BadRequest(413, "body too large") from exc
+        if len(raw) > MAX_BODY_BYTES:
+            raise BadRequest(413, "body too large")
+        return raw
+
+    async def _handle_ussd(self, request: web.Request) -> web.Response:
+        if not self._secret_ok(request):
+            logger.warning("[dialup] USSD callback with a wrong secret from %s", request.remote)
+            return web.Response(status=403, text="forbidden")
+        try:
+            fields = parse_ussd_form(await self._read_body(request))
+        except BadRequest as exc:
+            logger.warning("[dialup] rejected USSD callback: %s", exc.reason)
+            return web.Response(status=exc.status, text=exc.reason)
+        try:
+            body = await self.ussd_round(fields)
+        except Exception:
+            logger.exception("[dialup] USSD callback failed")
+            body = SORRY
+        return web.Response(text=body, content_type="text/plain")
+
+    async def ussd_round(self, fields: Mapping[str, str]) -> str:
+        """One USSD callback → the ``CON``/``END`` text. Never awaits the model."""
+        now = time.time()
+        session_id, text = fields["sessionId"], fields.get("text", "")
+        phone = normalize_phone(fields["phoneNumber"], self.settings.default_country_code)
+        allowed, allow_all = live_allowlist(self.config.extra)
+        if phone is None or not (allow_all or phone in allowed):
+            logger.info("[dialup] USSD from %s refused (not allowlisted)", redact_phone(fields["phoneNumber"]))
+            return NOT_ALLOWED
+        if self._store is None:
+            return SORRY
+
+        snap = await asyncio.to_thread(self._store.snapshot, phone, ttl_hours=self.settings.reply_ttl_hours,
+                                       approval_max_age=APPROVAL_MENU_MAX_AGE)
+        pending = None
+        if snap.pending is not None:
+            pending = ussd.PendingApproval(snap.pending.request_id, snap.pending.text, snap.pending.choices)
+        data = ussd.MenuData(
+            service_code=self.settings.service_code, page_chars=self.settings.ussd_page_chars,
+            quick_prompts=self.settings.quick_prompts, last_reply=snap.last_reply,
+            status_line=snap.status_line, pending=pending)
+
+        reply = ussd.handle(self._sessions.get(session_id, now), text, data, now)
+        response = reply.response
+        if isinstance(reply.action, ussd.Dispatch):
+            response = await self._dispatch(phone, session_id, text, reply.action.text) or response
+        elif isinstance(reply.action, ussd.Resolve):
+            response = await self._resolve(phone, reply.action)
+        if response.startswith(ussd.END):
+            self._sessions.put(session_id, ussd.ended_state(text, response, now))
+        else:
+            self._sessions.put(session_id, reply.state)
+        return response
+
+    async def _dispatch(self, phone: str, session_id: str, text: str, message: str) -> Optional[str]:
+        """Start an agent turn for ``message`` in the background. Returns a replacement response
+        when the turn can't start (rate cap), else None."""
+        digest = hashlib.sha1(text.encode("utf-8")).hexdigest()[:12]
+        if self._dedup.is_duplicate(f"{session_id}:{len(text)}:{digest}"):
+            return None  # the same callback again: the turn already started
+        is_command = message.startswith("/")
+        if not is_command and not await asyncio.to_thread(
+                self._store.try_consume_turn, phone, self.settings.turns_hourly_cap):
+            logger.info("[dialup] turn cap reached for %s", redact_phone(phone))
+            return LIMIT_REACHED
+        message_id = f"ussd:{session_id}:{digest}"
+        source = self.build_source(chat_id=phone, chat_name=phone, chat_type="dm", user_id=phone,
+                                   user_name=phone, message_id=message_id)
+        event = MessageEvent(text=message, message_type=MessageType.TEXT, source=source, message_id=message_id)
+        task = asyncio.create_task(self.handle_message(event))
+        self._background_tasks.add(task)
+        task.add_done_callback(self._background_tasks.discard)
+        logger.info("[dialup] message from %s dispatched (%d chars)", redact_phone(phone), len(message))
+        return None
+
+    async def _resolve(self, phone: str, action: ussd.Resolve) -> str:
+        """Answer an approval from the USSD menu (P1: wired up in M4)."""
+        return ussd.END + "Approvals over USSD are not available yet."
+
+    async def _handle_ussd_event(self, request: web.Request) -> web.Response:
+        """AT's end-of-session notification. Logged (redacted) and acknowledged; nothing else."""
+        if not self._secret_ok(request):
+            return web.Response(status=403, text="forbidden")
+        try:
+            raw = await self._read_body(request)
+            form = urllib.parse.parse_qs(raw.decode("utf-8"), keep_blank_values=True, max_num_fields=30)
+        except (BadRequest, UnicodeDecodeError, ValueError):
+            return web.Response(status=400, text="bad request")
+        phone = (form.get("phoneNumber") or [""])[0][:24]
+        status = (form.get("status") or [""])[0][:32]
+        logger.info("[dialup] USSD session ended for %s (status=%s)", redact_phone(phone), status or "?")
+        return web.Response(text="ok", content_type="text/plain")
 
     async def _handle_health(self, request: web.Request) -> web.Response:
         return web.Response(text="ok", content_type="text/plain")
 
 
-async def standalone_send(pconfig: Any, chat_id: str, message: str, **kwargs: Any) -> dict:
-    """Cron delivery without a live gateway (M2)."""
+# --------------------------------------------------------------------------- cron, no gateway
+
+async def standalone_send(pconfig: Any, chat_id: str, message: str, *, thread_id=None, media_files=None,
+                          force_document=False, **_: Any) -> dict:
+    """Send from a process without the live gateway (``hermes cron`` running on its own).
+    Same formatting, caps and allowlist as the live adapter."""
     from gateway.platforms._shared import send_error
-    return send_error("DialUp standalone send is not implemented yet")
+
+    extra = getattr(pconfig, "extra", None) or {}
+    settings = load_settings(extra)
+    if settings.transport not in ("local", "africastalking"):
+        return send_error(f"DialUp: unknown DIALUP_TRANSPORT {settings.transport!r}")
+    if settings.transport == "africastalking" and not (settings.at_username and settings.at_api_key):
+        return send_error("DialUp not configured: AFRICASTALKING_USERNAME and AFRICASTALKING_API_KEY are required")
+    store = await asyncio.to_thread(Store)
+    transport = build_transport(settings)
+    try:
+        outcome = await deliver(settings, store, transport, chat_id, message, None, extra=extra)
+    except Exception as exc:
+        return send_error(f"DialUp send failed ({type(exc).__name__})")
+    finally:
+        await transport.close()
+        await asyncio.to_thread(store.close)
+    if not outcome.success:
+        return send_error(f"DialUp: {outcome.error}")
+    return {"success": True, "platform": "dialup", "chat_id": chat_id, "message_id": outcome.message_id}

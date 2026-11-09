@@ -18,7 +18,7 @@ from .hint import PLATFORM_HINT
 logger = logging.getLogger(__name__)
 
 PLATFORM_NAME = "dialup"
-DOCS_URL = "https://github.com/Emediong-Etuk/hermes-dialup#readme"
+DOCS_URL = "https://github.com/Emediong-Etuk/DialUp#readme"
 
 
 def _aiohttp_available() -> bool:

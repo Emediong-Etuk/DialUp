@@ -4,7 +4,7 @@ DialUp is a Hermes Agent platform plugin (`kind: platform`). A phone dials a USS
 Africa's Talking (AT); Hermes answers by SMS. This file is the working plan: what we build, what
 the Hermes source told us, what is still open, and the milestone checklist.
 
-Status: **M0 done** (Nov 9). Next: M1.
+Status: **M1 done** (Nov 9). Next: M2.
 
 ---
 
@@ -78,7 +78,7 @@ docs/demo-script.md  docs/screenshots/  docs/banner.png (Greg)
    stamps mid-turn sends with `metadata["_interim_send"]` (LINE checks both). We check both too.
    `display_tier="minimal"` does not switch off `busy_steer_ack_enabled`; we also pass
    `display_overrides={"busy_steer_ack_enabled": False}` when the field exists.
-   Gateway start/restart notices (`♻️ Gateway online…`) go to the home channel on every start
+   Gateway start/restart notices (`♻ Gateway online…`) go to the home channel on every start
    (`PlatformConfig.gateway_restart_notification` defaults to true), so we add `♻` to our
    "status, don't SMS" prefixes, and the README suggests `gateway_restart_notification: false`.
 8. **Allowlist number format.** Core's gateway authz compares `DIALUP_ALLOWED_USERS` entries to
@@ -130,13 +130,9 @@ is SSRF-safe httpx; `plugin_db()` is WAL SQLite with `check_same_thread=False`;
 
 ## 5. Open questions for Greg
 
-1. **Repo name.** This session's repo is `Emediong-Etuk/DialUp`; the brief says
-   `Emediong-Etuk/hermes-dialup`. Options: (a) rename the GitHub repo to `hermes-dialup`
-   (recommended: matches Hermes naming, GitHub redirects the old URL), (b) keep `DialUp` and I
-   update every URL. I'm using `hermes-dialup` in docs until you say otherwise.
-2. **Release branch.** I push to `claude/dialup-ussd-sms-plugin-1sob6g`. The catalog SHA should be a
-   commit on `main` of the public repo. OK to merge this branch to `main` at M5, or do you want to?
-3. **Repo visibility.** Is the repo public already? The catalog CI clones it at the pinned SHA.
+1. ~~Repo name~~ **Decided:** keep `Emediong-Etuk/DialUp`.
+2. ~~Release branch~~ **Decided:** merge this branch to `main` at M5; the repo is public.
+3. ~~Deadline~~ **Confirmed:** 11 PM WAT, Nov 11.
 4. **What I need from you, and when:**
    - M2: AT sandbox API key (enter it through the secure credential form, never in chat), the USSD
      service code AT assigns, a test phone number for `DIALUP_ALLOWED_USERS`, and your tunnel URL.
@@ -144,7 +140,6 @@ is SSRF-safe httpx; `plugin_db()` is WAL SQLite with `check_same_thread=False`;
      transport against the real API; otherwise I test against a fake server and you run the live
      check.
    - M5: go-ahead before anything public (catalog PR, X post, form).
-5. **Deadline.** Confirm 5 PM EST / 11 PM WAT on Nov 11 in the Nous Discord.
 
 ---
 
@@ -163,9 +158,30 @@ M0 evidence: 9 registration tests pass; `doctor --ci` OK; `validate` passes with
 connected DialUp in local mode and `GET /dialup/health` returned `ok`.
 
 **M1, Tue midday (P0)**
-- [ ] `ussd.py`, `smstext.py`, `phone.py` with full unit tests
-- [ ] Adapter webhook + LocalTransport + store
-- [ ] `hermes dialup simulate` end to end with a real agent turn; reply in outbox and USSD reader
+- [x] `ussd.py`, `smstext.py`, `phone.py` with full unit tests
+- [x] Adapter webhook + LocalTransport + store
+- [x] `hermes dialup simulate` end to end with a real agent turn; reply in outbox and USSD reader
+
+M1 evidence: 131 tests pass (USSD, SMS text, phone, transport, webhook, send, standalone send,
+simulator, registration). `doctor --ci` OK, `validate --install-deps` passes, security scan `safe`.
+Real run: `hermes gateway run` (local transport, OpenRouter model) + `hermes dialup simulate
+--keys "1|In one sentence, what is USSD?"`: the answer arrived in the outbox after 8 s, and
+`3 Last reply` paged the same stored text in 3 screens, each under 160 chars.
+
+M1 notes:
+- **AT docs unreachable from here.** `developers.africastalking.com` is blocked by this sandbox's
+  network policy, so the AT transport follows the brief (form POST to `/version1/messaging`,
+  `apiKey` header, recipient `statusCode` 100/101/102 = success). It is tested against a fake
+  server only. Verify against the live sandbox in M2.
+- **Core logs message text.** DialUp's own logs hold only redacted numbers and lengths, but core's
+  `gateway.run` logs `inbound message: ... msg='<text>'` at INFO. Not ours to change; the README
+  says so.
+- **Hermes' first-contact greeting** ("Hi, I'm Hermes... build a short profile?") is appended to
+  the first reply by core. It makes the first SMS longer; nothing for the plugin to do.
+- The validator's security scan flagged literal invisible characters (zero-width spaces in the
+  GSM-7 replacement table). All non-ASCII in source is now either the visible GSM-7 alphabet or
+  written as `\uXXXX` escapes.
+- `ussd.Settings` page size floor raised to 120 so the home screen always fits.
 
 **M2, Tue evening (P0)**
 - [ ] AfricasTalkingTransport (tests against a fake server)

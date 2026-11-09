@@ -1,0 +1,17 @@
+name: dialup
+repo: https://github.com/Emediong-Etuk/DialUp
+sha: 0000000000000000000000000000000000000000  # DRAFT: replaced with the pushed release commit at M5
+title: DialUp
+description: "Reach your Hermes agent from any phone with no app and no data: dial a USSD code to ask, and answers, reminders and approval alerts come back by SMS, through Africa's Talking (Nigeria, Kenya, Uganda, Tanzania). A local transport writes SMS to a file so you can try it with no account. Disclosure — while the gateway runs it listens for Africa's Talking USSD callbacks on DIALUP_WEBHOOK_HOST:DIALUP_WEBHOOK_PORT (default 127.0.0.1:8787) behind a secret URL path; the phone number is trusted only because the request comes through that secret URL. It calls only the Africa's Talking messaging host for your account (api.sandbox.africastalking.com or api.africastalking.com) with AFRICASTALKING_API_KEY, and each SMS and USSD session is billed to your Africa's Talking account. An empty DIALUP_ALLOWED_USERS answers nobody; allowlisted numbers start full agent turns with the toolset you allow for the dialup platform, and SMS go only to allowlisted numbers and DIALUP_HOME_CHANNEL. The last 5 replies per number (kept DIALUP_REPLY_TTL_HOURS, default 24 h), hourly rate counters and pending approvals are kept in plugin-data/dialup/data.db until hermes dialup purge. No telemetry, no shell commands, no self-updates."
+maintainer: Emediong-Etuk
+tier: community
+category: platform
+requires_hermes: ">=0.23.0"
+docs_url: https://github.com/Emediong-Etuk/DialUp#readme
+version: "0.1.0"
+platforms: []
+capabilities:
+  provides_tools: []
+  provides_hooks: []
+  provides_middleware: []
+  requires_env: []

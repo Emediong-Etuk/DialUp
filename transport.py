@@ -90,7 +90,12 @@ class LocalTransport:
 # --------------------------------------------------------------------------- Africa's Talking
 
 class AfricasTalkingTransport:
-    """AT bulk messaging API (``POST {base}/version1/messaging``, form encoded)."""
+    """AT bulk messaging API (``POST {base}/version1/messaging``, form encoded).
+
+    Request shape checked against AT's official Python SDK (``africastalking`` 2.0.3,
+    ``SMSService.send``): form fields ``username``, ``to``, ``message``, ``bulkSMSMode=1`` and
+    optional ``from``; headers ``apiKey`` and ``Accept: application/json``.
+    """
 
     name = "africastalking"
 
@@ -119,7 +124,7 @@ class AfricasTalkingTransport:
     def _request(self, to: str, message: str) -> tuple[dict, dict]:
         headers = {"apiKey": self._api_key, "Accept": "application/json",
                    "Content-Type": "application/x-www-form-urlencoded"}
-        form = {"username": self._username, "to": to, "message": message}
+        form = {"username": self._username, "to": to, "message": message, "bulkSMSMode": "1"}
         if self._from:
             form["from"] = self._from
         return headers, form

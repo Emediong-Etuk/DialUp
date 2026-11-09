@@ -59,7 +59,8 @@ async def test_request_shape():
     assert req.headers["Accept"] == "application/json"
     assert req.headers["Content-Type"] == "application/x-www-form-urlencoded"
     form = dict(urllib.parse.parse_qsl(req.content.decode()))
-    assert form == {"username": "sandbox", "to": "+2348031234567", "message": "Hello from Hermes", "from": "HERMES"}
+    assert form == {"username": "sandbox", "to": "+2348031234567", "message": "Hello from Hermes",
+                    "bulkSMSMode": "1", "from": "HERMES"}
 
 
 @pytest.mark.asyncio

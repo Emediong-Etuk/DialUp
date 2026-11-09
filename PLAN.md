@@ -4,7 +4,7 @@ DialUp is a Hermes Agent platform plugin (`kind: platform`). A phone dials a USS
 Africa's Talking (AT); Hermes answers by SMS. This file is the working plan: what we build, what
 the Hermes source told us, what is still open, and the milestone checklist.
 
-Status: **M1 done** (Nov 9). Next: M2.
+Status: **M2 in progress** (Nov 9): blocked only on a valid AT sandbox key and the live run.
 
 ---
 
@@ -184,10 +184,28 @@ M1 notes:
 - `DIALUP_USSD_PAGE_CHARS` now has a floor of 120 (in `settings.py`) so the home screen always fits.
 
 **M2, Tue evening (P0)**
-- [ ] AfricasTalkingTransport (tests against a fake server)
+- [x] AfricasTalkingTransport (tests against a fake server; request shape checked against AT's official SDK)
 - [ ] Real AT sandbox run through your tunnel
-- [ ] Cron `deliver=dialup` + `standalone_sender_fn`
-- [ ] Hourly caps, outbound allowlist, security items 1–8
+- [x] Cron `deliver=dialup` + `standalone_sender_fn`
+- [x] Hourly caps, outbound allowlist, security items 1–8
+
+M2 notes (Nov 9):
+- **AT request shape verified** against AT's official Python SDK (`africastalking` 2.0.3 from PyPI,
+  read, not run): form POST to `{base}/version1/messaging`, headers `apiKey` + `Accept:
+  application/json`, fields `username`, `to`, `message`, `bulkSMSMode=1`, optional `from`; response
+  `SMSMessageData.Recipients[].statusCode` (101 = sent). We now send `bulkSMSMode=1` too. AT's docs
+  site sits behind a Cloudflare bot check, so scripts can't read it.
+- **Live sandbox send: 401 "The supplied authentication is invalid"**, with and without our
+  placeholder header, for over 2 minutes after the key was saved. The request reaches AT, so the
+  saved key itself is being rejected (wrong app, regenerated since, or a prefix in the form).
+  Waiting on Greg to re-check the key.
+- **Cron without a gateway works:** `hermes cron create "every 1h" ... --deliver dialup`, then
+  `hermes cron run` + `hermes cron tick`, delivered through `standalone_send` into the outbox.
+  Core wraps cron output in a "Cronjob Response / job_id / ----" header and footer (2 SMS parts
+  for a one-line reminder). `cron.wrap_response: false` in config.yaml turns it off; it's a global
+  setting, so the README recommends it rather than the plugin changing it.
+- **Security audit (items 1–8):** no `os.environ`/`os.getenv`/`.env` reads in plugin code; every
+  DialUp log line has only redacted numbers, lengths or status codes.
 
 **M3, Tue night (P0)**
 - [ ] README with Disclosure, `.env.example`, CI workflow

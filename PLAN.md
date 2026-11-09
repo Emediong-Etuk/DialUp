@@ -181,7 +181,7 @@ M1 notes:
 - The validator's security scan flagged literal invisible characters (zero-width spaces in the
   GSM-7 replacement table). All non-ASCII in source is now either the visible GSM-7 alphabet or
   written as `\uXXXX` escapes.
-- `ussd.Settings` page size floor raised to 120 so the home screen always fits.
+- `DIALUP_USSD_PAGE_CHARS` now has a floor of 120 (in `settings.py`) so the home screen always fits.
 
 **M2, Tue evening (P0)**
 - [ ] AfricasTalkingTransport (tests against a fake server)

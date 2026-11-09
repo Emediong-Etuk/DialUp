@@ -4,7 +4,7 @@ DialUp is a Hermes Agent platform plugin (`kind: platform`). A phone dials a USS
 Africa's Talking (AT); Hermes answers by SMS. This file is the working plan: what we build, what
 the Hermes source told us, what is still open, and the milestone checklist.
 
-Status: **M2 in progress** (Nov 9): blocked only on a valid AT sandbox key and the live run.
+Status: **M4 code done** (Nov 9). Open: valid AT sandbox key, live tunnel run, demo, release.
 
 ---
 
@@ -224,9 +224,26 @@ M3 notes (Nov 9):
 - Still open from M2: the sandbox key returns 401, and the live tunnel run.
 
 **M4, Wed morning**
-- [ ] P1: approvals over USSD, `5 Stop task`, quick tasks if not done
+- [x] P1: approvals over USSD, `5 Stop task`, quick tasks if not done
 - [ ] Cut rule: if M2 isn't done by Tue 22:00 WAT, skip approvals and polish P0
 - [ ] Record the demo together
+
+M4 notes (Nov 9, ahead of schedule):
+- `_send_exec_approval_prompt` stores the request, sends one SMS ("Dial ... then 4"), and returns
+  `approval:<request_id>` as the card id. Core's timeout edits that card through `edit_message`,
+  which retires the menu item; nothing runs.
+- `4 Approve` shows the command exactly (fixed-width pages, nothing trimmed), then only
+  `Approve once` / `Deny`, filtered to what core offered. Deny only when core says so, when the
+  command has non-printable-ASCII characters, or when it is over 1,500 characters.
+- Answers: `approval_refusal` first, then `resolve_gateway_approval_card(..., actor_id=phone,
+  extra=...)`. Both are feature-detected: `gateway.approval_actor` and the actor keywords arrived
+  after v0.23.0. On v0.23.0, `hermes plugins validate` therefore warns that `gateway.approval_actor`
+  is not public (that release's list predates it); on main it raises no warning.
+- Real run (OpenRouter model, `approvals.mode: manual`): ask to `rm -rf` a folder → one SMS →
+  `4`, two screens of command, `1 Approve once` → folder deleted, result SMS. Timeout run
+  (`approvals.timeout: 20`): menu item retired, folder kept, the agent's reply said it did not run.
+- Hermes' default `approvals.mode: smart` let the auxiliary model approve an explicitly requested
+  `rm -rf` in /tmp without asking; the README explains `manual` for people who want every prompt.
 
 **M5, Wed by 18:00 WAT**
 - [ ] Final commit → SHA → `catalog/dialup.yaml` + `catalog/PR_DESCRIPTION.md`

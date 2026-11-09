@@ -165,13 +165,32 @@ Every setting can be an env var in `~/.hermes/.env` or a key under `gateway.plat
 | `1` Ask or reply | Type a message. It goes to the agent (this also answers Hermes' questions); the answer comes by SMS. |
 | `2` Quick tasks | Your `DIALUP_QUICK_PROMPTS`, one key each. Typing on a keypad is slow. |
 | `3` Last reply | The latest answer, paged. `98` next page, `0` back. Costs no SMS. |
-| `4` Approve | Shown only when a command is waiting for your OK. |
+| `4` Approve | Shown only when a command is waiting for your OK: the whole command, page by page, then `1 Approve once` / `2 Deny`. |
 | `5` Stop task | Sends `/stop` to stop what the agent is doing. |
 | `0` Help | How DialUp works. |
 | `00` | Home from anywhere. |
 
 Hermes' own busy messages ("Queued", "Interrupting") and "gateway online" notices are not sent as SMS; the latest
 one shows on the home screen instead.
+
+## Approvals from a keypad
+
+When the agent wants to run a command that Hermes flags as risky, you get one SMS:
+`Hermes needs your OK to run a command. Dial *384*55# then 4 to review. No answer = it won't run.`
+
+- `4 Approve` shows the **whole command, character for character**, across as many screens as it needs.
+  `Approve once` and `Deny` only appear after the last page, so nobody approves a command they haven't seen.
+- Only **Approve once** and **Deny** are offered, even when Hermes would allow "for this session" or "always":
+  a keypad is no place to hand out standing permission.
+- **Deny only** when Hermes couldn't show the whole command, or when the command has characters a USSD screen
+  can't display (they'd appear as `?`).
+- If nobody answers within Hermes' `approvals.timeout` (5 minutes by default), the command does not run and the
+  item leaves the menu.
+- Answers go through Hermes' own approval helpers (`approval_refusal`, then `resolve_gateway_approval_card`), so
+  `approvals.approvers` and the timeout work exactly as on other platforms.
+
+Hermes' default `approvals.mode: smart` lets a second model wave through commands it judges safe; set
+`approvals.mode: manual` if you want every flagged command to ask you.
 
 ## CLI
 
@@ -190,7 +209,7 @@ one shows on the home screen instead.
 
 - **The phone number is trusted only because the request comes from Africa's Talking through a secret URL.**
   Africa's Talking doesn't sign USSD callbacks, so anyone who learns the callback URL can send requests in the
-  name of any phone number. The secret path segment (compared in constant time) is what stops that. Keep it out of
+  name of any phone number, and approve commands in that name. The secret path segment (compared in constant time) is what stops that. Keep it out of
   screenshots and logs, and rotate it with `hermes dialup secret` if it leaks.
 - **Local by default.** The webhook listens on `127.0.0.1`; expose it with a tunnel or reverse proxy over HTTPS.
   The `local` transport refuses to start on a non-loopback address.
@@ -207,7 +226,8 @@ one shows on the home screen instead.
 - **Secrets through Hermes only.** The API key and webhook secret are read through Hermes' profile-scoped secret
   store, never from `os.environ` or `.env` files directly, and never logged.
 - **Approvals.** Commands that need your OK go through Hermes' own approval system and its timeout: if
-  nobody answers, the command does not run. DialUp never auto-approves.
+  nobody answers, the command does not run. DialUp never auto-approves, never offers more than "approve once",
+  and shows the whole command before Approve.
 
 ## Disclosure
 

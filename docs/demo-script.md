@@ -10,6 +10,7 @@ terminal the right half. Total target: 85 s.
 - [ ] `~/.hermes/.env`: `DIALUP_ALLOWED_USERS=+2347012345678`, `DIALUP_HOME_CHANNEL=+2347012345678`,
       `DIALUP_SERVICE_CODE=*384*37264#`, `DIALUP_QUICK_PROMPTS=Summarise my day|Any urgent email?`
 - [ ] `cron.wrap_response: false` in `config.yaml` (so the reminder SMS is one clean line).
+- [ ] `approvals.mode: manual` in `config.yaml` so shot 4 really asks (the default `smart` may wave it through).
 - [ ] Tools for the phone limited: `hermes tools disable --platform dialup terminal code_execution computer_use browser file image_gen tts vision`
       (keep `web` and `cronjob`). For shot 4 (P1), temporarily re-enable `terminal`.
 - [ ] Send one throwaway message first, so Hermes' first-contact greeting is out of the way.

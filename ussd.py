@@ -184,14 +184,26 @@ def _split_words(text: str, budget: int) -> list[str]:
     return chunks or [""]
 
 
-def paginate(text: str, page_chars: int, *, reserve: int = 0, last_footer: str = LAST_FOOTER) -> list[str]:
+def _split_exact(text: str, budget: int) -> list[str]:
+    """Fixed-size chunks with nothing trimmed: joined back together they are ``text`` exactly."""
+    return [text[i:i + budget] for i in range(0, len(text), budget)] or [""]
+
+
+def paginate(text: str, page_chars: int, *, reserve: int = 0, last_footer: str = LAST_FOOTER,
+             exact: bool = False) -> list[str]:
     """Bodies of the pages ``text`` needs so every rendered screen fits ``page_chars``.
 
     A screen is ``"(i/n)\\n" + body + "\\n" + footer``. ``reserve`` keeps room for a prefix such as
     ``"Invalid choice "`` on the header line; ``last_footer`` is the footer the final page shows.
     A text that fits one screen gets one page and no header.
+
+    ``exact=True`` (approvals) splits at fixed widths and trims nothing, so the pages put back
+    together are the text character for character: a command someone approves must not be
+    reflowed. Normal replies split at spaces, which reads better.
     """
-    text = (text or "").strip()
+    text = text or ""
+    if not exact:
+        text = text.strip()
     if len(text) + 1 + len(last_footer) + reserve <= page_chars:
         return [text]
     total = 2
@@ -200,7 +212,7 @@ def paginate(text: str, page_chars: int, *, reserve: int = 0, last_footer: str =
         budget = page_chars - reserve - header - 1 - len(MORE_FOOTER)
         if budget < 10:
             raise ValueError(f"USSD page size {page_chars} is too small to paginate")
-        pages = _split_words(text, budget)
+        pages = _split_exact(text, budget) if exact else _split_words(text, budget)
         if len(str(len(pages))) <= len(str(total)):
             return pages
         total = len(pages)
@@ -327,7 +339,7 @@ def _home_choice(choice: str, state: SessionState, data: MenuData, now: float, t
         if not choices:
             return _end(NO_APPROVAL_TEXT)
         pages = tuple(paginate(data.pending.text, data.page_chars, reserve=len(INVALID) + 1,
-                               last_footer=MORE_FOOTER))
+                               last_footer=MORE_FOOTER, exact=True))
         return _con(replace(state, screen=APPROVE, page=0, pages=pages, request_id=data.pending.request_id,
                             choices=choices), data, now, text)
     if choice == "4":

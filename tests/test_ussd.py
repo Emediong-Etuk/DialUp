@@ -199,8 +199,9 @@ def test_approve_shows_full_text_before_options():
     while "Your answer:" not in pages[-1]:
         assert "1 Approve once" not in pages[-1]  # no Approve before the whole text was shown
         pages.append(_screen(phone.press("98")))
-    shown = " ".join(p.split("\n", 1)[1].rsplit("\n", 1)[0] for p in pages[:-1])
-    assert " ".join(shown.split()) == " ".join(APPROVAL_TEXT.split())
+    # Header line off the top, footer line off the bottom: the bodies rebuild the text exactly.
+    shown = "".join(p.split("\n", 1)[1].rsplit("\n", 1)[0] for p in pages[:-1])
+    assert shown == APPROVAL_TEXT
     options = pages[-1]
     assert "1 Approve once" in options and "2 Deny" in options
     assert "session" not in options.lower() and "always" not in options.lower()
@@ -270,6 +271,17 @@ def test_session_store_ttl_and_bound():
 def _random_text(rng):
     words = ["naira", "meeting", "Tunde", "rm", "-rf", "x" * rng.randint(1, 60), "ok.", "\n", "1,520"]
     return " ".join(rng.choice(words) for _ in range(rng.randint(1, 120)))
+
+
+@pytest.mark.parametrize("limit", [120, 140, 160, 182])
+def test_exact_pages_rebuild_text_and_fit(limit):
+    rng = random.Random(limit + 1)
+    for _ in range(200):
+        text = "".join(rng.choice("ab  c\n*#-/") for _ in range(rng.randint(1, 900)))
+        pages = paginate(text, limit, reserve=len(ussd.INVALID) + 1, last_footer=ussd.MORE_FOOTER, exact=True)
+        assert "".join(pages) == text
+        for i in range(len(pages)):
+            assert len(render_page(pages, i, invalid=True, last_footer=ussd.MORE_FOOTER)) <= limit
 
 
 @pytest.mark.parametrize("limit", [120, 140, 160, 182])

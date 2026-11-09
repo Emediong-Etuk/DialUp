@@ -25,7 +25,7 @@ from typing import Any, Mapping, Optional
 from aiohttp import web
 
 from gateway.config import Platform, PlatformConfig
-from gateway.platforms.base import BasePlatformAdapter, SendResult
+from gateway.platforms.base import BasePlatformAdapter, ExecApprovalPrompt, SendResult
 from gateway.platforms.event import MessageEvent, MessageType
 from gateway.platforms.helpers import MessageDeduplicator, redact_phone, strip_markdown
 
@@ -33,7 +33,7 @@ from . import ussd
 from .phone import normalize_phone
 from .settings import Settings, load_settings
 from .smstext import full_reply_footer, to_gsm7, truncate_for_sms
-from .store import Store
+from .store import Pending, Store
 from .transport import Transport, build_transport
 
 logger = logging.getLogger(__name__)
@@ -49,9 +49,16 @@ LIMIT_REACHED = ussd.END + "Limit reached. Try again later."
 STATUS_PREFIXES = ("⚡", "⏳", "⏩", "💾", "♻")
 STATUS_MAX_CHARS = 60
 
-# How long an approval stays on the USSD menu. Core times the request out itself (approvals.timeout,
-# 5 minutes by default); this only stops a stale row from lingering if a timeout notice is missed.
-APPROVAL_MENU_MAX_AGE = 60 * 60
+# Approvals. Core owns the request and its timeout (approvals.timeout, 5 minutes by default); DialUp
+# keeps a copy so the USSD menu can show it. Core retires our copy through edit_message() when the
+# request times out; the age limit below only stops a row lingering if that edit never arrives.
+APPROVAL_CARD_PREFIX = "approval:"
+APPROVAL_SMS = "Hermes needs your OK to run a command. Dial {code} then 4 to review. No answer = it won't run."
+APPROVAL_GRACE_SECONDS = 60
+# Longer than this (about 12 USSD screens) is too much to review on a keypad: Deny only.
+MAX_APPROVAL_COMMAND_CHARS = 1500
+APPROVAL_DONE = {"once": "Approved once. Hermes will run it now.", "session": "Approved for this session.",
+                 "always": "Always approved.", "deny": "Denied. It will not run."}
 
 # Form field limits. AT's values are short; anything longer is not from AT.
 _FIELD_LIMITS = {"sessionId": 128, "serviceCode": 40, "phoneNumber": 24, "text": 2048, "networkCode": 16}
@@ -108,6 +115,66 @@ def live_allowlist(extra: Optional[Mapping[str, Any]]) -> tuple[frozenset[str], 
     """(allowed numbers, allow-all) re-read now, so an edited allowlist applies at once."""
     s = load_settings(extra)
     return s.allowed_users, s.allow_all_users
+
+
+def approval_menu_max_age() -> float:
+    """Core's approval timeout plus a little grace, read from Hermes' config (public ``hermes_cli.config``)."""
+    try:
+        from hermes_cli.config import load_config_readonly
+        timeout = int(((load_config_readonly() or {}).get("approvals") or {}).get("timeout", 300))
+    except Exception:
+        timeout = 300
+    return max(60, timeout) + APPROVAL_GRACE_SECONDS
+
+
+def _ussd_safe(text: str) -> str:
+    """One line of explanatory text for a USSD screen: GSM-7, then ASCII only."""
+    return to_gsm7(strip_markdown(text or "")).encode("ascii", "ignore").decode("ascii")
+
+
+def approval_helpers():
+    """``(resolve, approval_refusal, refusal_text)`` from core's public approval API.
+
+    ``gateway.approval_actor`` (who may answer, for ``approvals.approvers``) and the ``actor_id`` /
+    ``extra`` keywords of ``resolve_gateway_approval_card`` arrived after Hermes v0.23.0. On a core
+    without them there is no approvers setting, and only the requester's own phone can reach their
+    approval (DialUp keys it by number), so the refusal check is simply skipped there."""
+    from tools.approval import resolve_gateway_approval_card
+    try:
+        from gateway.approval_actor import approval_refusal, refusal_text
+    except ImportError:
+        approval_refusal = refusal_text = None
+    return resolve_gateway_approval_card, approval_refusal, refusal_text
+
+
+def _accepts_actor(resolve) -> bool:
+    import inspect
+    try:
+        return "actor_id" in inspect.signature(resolve).parameters
+    except (TypeError, ValueError):
+        return False
+
+
+def command_is_exact_on_ussd(command: str) -> bool:
+    """True when every character of ``command`` shows on a USSD screen as itself (printable ASCII
+    and newlines). Otherwise the user can't read the real command, so only Deny is offered."""
+    return bool(command) and all(c == "\n" or 32 <= ord(c) < 127 for c in command)
+
+
+def approval_screen_text(command: str, description: str) -> tuple[str, bool]:
+    """(text the USSD approval pages show, whether the command is shown exactly)."""
+    exact = command_is_exact_on_ussd(command) and len(command) <= MAX_APPROVAL_COMMAND_CHARS
+    too_long = len(command) > MAX_APPROVAL_COMMAND_CHARS
+    if too_long:
+        command = command[:MAX_APPROVAL_COMMAND_CHARS]
+    shown = command if command_is_exact_on_ussd(command) else "".join(c if c == "\n" or 32 <= ord(c) < 127 else "?" for c in command)
+    lines = ["Hermes wants to run:", shown, f"Why: {_ussd_safe(description) or 'flagged as risky'}"]
+    if too_long:
+        lines.append("(cut: too long to review on a phone, so only Deny is offered)")
+    elif not exact:
+        lines.append("Some characters can't show on USSD, so only Deny is offered.")
+    lines.append("No answer = it won't run.")
+    return "\n".join(lines), exact
 
 
 # --------------------------------------------------------------------------- outbound core
@@ -185,7 +252,7 @@ class DialUpAdapter(BasePlatformAdapter):
         self._store: Optional[Store] = None
         self._transport: Optional[Transport] = None
         self._runner: Optional[web.AppRunner] = None
-        self.bound_port: Optional[int] = None
+        self._approval_max_age = approval_menu_max_age()
 
     # -- lifecycle ---------------------------------------------------------------------------
 
@@ -338,7 +405,7 @@ class DialUpAdapter(BasePlatformAdapter):
             return SORRY
 
         snap = await asyncio.to_thread(self._store.snapshot, phone, ttl_hours=self.settings.reply_ttl_hours,
-                                       approval_max_age=APPROVAL_MENU_MAX_AGE)
+                                       approval_max_age=self._approval_max_age)
         pending = None
         if snap.pending is not None:
             pending = ussd.PendingApproval(snap.pending.request_id, snap.pending.text, snap.pending.choices)
@@ -381,8 +448,80 @@ class DialUpAdapter(BasePlatformAdapter):
         return None
 
     async def _resolve(self, phone: str, action: ussd.Resolve) -> str:
-        """Answer an approval from the USSD menu (P1: wired up in M4)."""
-        return ussd.END + "Approvals over USSD are not available yet."
+        """Answer a pending approval from the USSD menu, only through core's public helpers.
+
+        ``approval_refusal`` first (someone other than the requester, when ``approvals.approvers``
+        is narrowed, gets told who may answer and the request stays pending), then
+        ``resolve_gateway_approval_card`` for this card's own request id, which rechecks the
+        actor and refuses anything but Deny while the request is still Deny-only."""
+        pending = await asyncio.to_thread(self._store.get_pending, action.request_id)
+        if pending is None or pending.phone != phone:
+            return ussd.END + "That request is no longer waiting."
+        if action.choice not in pending.choices:
+            return ussd.END + "That option isn't available."
+        resolve, approval_refusal, refusal_text = approval_helpers()
+        extra = self.config.extra
+        if approval_refusal is not None:
+            requester = await asyncio.to_thread(
+                approval_refusal, pending.session_key, phone, extra=extra, request_id=pending.request_id)
+            if requester:
+                return ussd.END + _ussd_safe(refusal_text(requester))[: self.settings.ussd_page_chars]
+        actor = {"actor_id": phone, "extra": extra} if _accepts_actor(resolve) else {}
+        count = await asyncio.to_thread(resolve, pending.session_key, action.choice, pending.request_id, **actor)
+        await asyncio.to_thread(self._store.remove_pending, pending.request_id)
+        if not count:
+            return ussd.END + "That request was already answered or timed out."
+        logger.info("[dialup] approval answered by %s (choice=%s)", redact_phone(phone), action.choice)
+        return ussd.END + APPROVAL_DONE.get(action.choice, "Answer sent to Hermes.")
+
+    # -- approvals out -----------------------------------------------------------------------
+
+    async def _send_exec_approval_prompt(self, prompt: ExecApprovalPrompt) -> SendResult:
+        """Show an approval on the USSD menu (``4 Approve``) and send one SMS pointing to it.
+
+        Core decides the offered choices (``prompt.actions``): a command its card couldn't show in
+        full arrives Deny-only. We narrow further: Deny-only too when the command has characters a
+        USSD screen can't show, and the menu only ever offers Approve once and Deny. Returning a
+        card id lets core retire the menu item through ``edit_message`` when the request times out.
+        A failure here makes core fall back to its plain-text ``/approve`` prompt."""
+        if self._store is None or self._transport is None:
+            return SendResult(success=False, error="DialUp is not connected")
+        if not prompt.request_id:
+            return SendResult(success=False, error="approval has no request id")
+        phone = normalize_phone(prompt.chat_id, self.settings.default_country_code)
+        allowed, allow_all = live_allowlist(self.config.extra)
+        if phone is None or not (allow_all or phone in allowed or phone == self.settings.home_channel):
+            return SendResult(success=False, error="refused: number is not on DIALUP_ALLOWED_USERS")
+        text, exact = approval_screen_text(prompt.command, prompt.description)
+        choices = tuple(prompt.choices) if exact else tuple(c for c in prompt.choices if c == "deny")
+        await asyncio.to_thread(self._store.add_pending, Pending(
+            request_id=prompt.request_id, phone=phone, session_key=prompt.session_key, text=text,
+            choices=choices, created_at=time.time()))
+        await self._send_notice(phone, APPROVAL_SMS.format(code=self.settings.service_code))
+        logger.info("[dialup] approval waiting for %s (%d-char command%s)", redact_phone(phone),
+                    len(prompt.command), "" if exact else ", deny only")
+        return SendResult(success=True, message_id=APPROVAL_CARD_PREFIX + prompt.request_id)
+
+    async def edit_message(self, chat_id: str, message_id: str, content: str, *,
+                           finalize: bool = False) -> SendResult:
+        """Core edits an approval card when its request times out: retire it from the menu."""
+        if not str(message_id).startswith(APPROVAL_CARD_PREFIX) or self._store is None:
+            return SendResult(success=False, error="Not supported")
+        request_id = str(message_id)[len(APPROVAL_CARD_PREFIX):]
+        pending = await asyncio.to_thread(self._store.get_pending, request_id)
+        if pending is not None:
+            await asyncio.to_thread(self._store.remove_pending, request_id)
+            await asyncio.to_thread(self._store.set_status, pending.phone, "Approval timed out; it did not run")
+        return SendResult(success=True, message_id=str(message_id))
+
+    async def _send_notice(self, phone: str, text: str) -> None:
+        """A short system SMS: counts against the hourly cap, never stored as a reply."""
+        if not await asyncio.to_thread(self._store.try_consume_sms, phone, self.settings.sms_hourly_cap):
+            logger.info("[dialup] SMS cap reached for %s; notice not sent", redact_phone(phone))
+            return
+        result = await self._transport.send_sms(phone, text)
+        if not result.success:
+            logger.warning("[dialup] notice SMS to %s failed: %s", redact_phone(phone), result.error)
 
     async def _handle_ussd_event(self, request: web.Request) -> web.Response:
         """AT's end-of-session notification. Logged (redacted) and acknowledged; nothing else."""
